@@ -4,6 +4,7 @@ CFLAGS_user = -std=gnu11 -Wall -Wextra -Werror
 LDFLAGS_user = -lpthread
 
 obj-m += khttpd.o
+ccflags-y := -std=gnu11 -Wno-declaration-after-statement
 khttpd-objs := \
 	http_parser.o \
 	http_server.o \

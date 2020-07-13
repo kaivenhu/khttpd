@@ -8,17 +8,26 @@
 #include "http_server.h"
 
 #define CRLF "\r\n"
+#define REQUEST_FIB "fib"
+#define RESPONSE_HELLO "Hello World!"
+#define CONNECTION_CLOSE "Close"
+#define CONNECTION_KEEP "Keep-Alive"
 
 #define HTTP_RESPONSE_200_DUMMY                               \
     ""                                                        \
     "HTTP/1.1 200 OK" CRLF "Server: " KBUILD_MODNAME CRLF     \
     "Content-Type: text/plain" CRLF "Content-Length: 12" CRLF \
-    "Connection: Close" CRLF CRLF "Hello World!" CRLF
+    "Connection: Close" CRLF CRLF "%s" CRLF
 #define HTTP_RESPONSE_200_KEEPALIVE_DUMMY                     \
     ""                                                        \
     "HTTP/1.1 200 OK" CRLF "Server: " KBUILD_MODNAME CRLF     \
     "Content-Type: text/plain" CRLF "Content-Length: 12" CRLF \
-    "Connection: Keep-Alive" CRLF CRLF "Hello World!" CRLF
+    "Connection: Keep-Alive" CRLF CRLF "%s" CRLF
+#define HTTP_RESPONSE_200_TEMP                                 \
+    ""                                                         \
+    "HTTP/1.1 200 OK" CRLF "Server: " KBUILD_MODNAME CRLF      \
+    "Content-Type: text/plain" CRLF "Content-Length: %lu" CRLF \
+    "Connection: %s" CRLF CRLF "%s" CRLF
 #define HTTP_RESPONSE_501                                              \
     ""                                                                 \
     "HTTP/1.1 501 Not Implemented" CRLF "Server: " KBUILD_MODNAME CRLF \
@@ -73,16 +82,54 @@ static int http_server_send(struct socket *sock, const char *buf, size_t size)
     return done;
 }
 
+static unsigned long long fib(unsigned int k)
+{
+    if (unlikely(!k))
+        return 0;
+    unsigned long long f_n = 1;
+    unsigned long long f_n1 = 1;
+    for (int i = (30 - __builtin_clz(k)); i >= 0; --i) {
+        unsigned long long x = f_n * (2 * f_n1 - f_n);
+        unsigned long long y = f_n * f_n + f_n1 * f_n1;
+
+        if (k & (1 << i)) {
+            f_n = y;
+            f_n1 = x + y;
+        } else {
+            f_n = x;
+            f_n1 = y;
+        }
+    }
+    return f_n;
+}
+
+static void resp_req(const char *req, const char *conn, char *resp, size_t size)
+{
+    unsigned int idx = 0;
+    char result[32] = {'\0'};
+    if (!strstr(req, REQUEST_FIB) ||
+        1 != sscanf(req, "/" REQUEST_FIB "/%u", &idx)) {
+        snprintf(resp, size, HTTP_RESPONSE_200_TEMP, strlen(RESPONSE_HELLO),
+                 conn, RESPONSE_HELLO);
+        return;
+    }
+    snprintf(result, sizeof(result), "%llu", fib(idx));
+    snprintf(resp, size, HTTP_RESPONSE_200_TEMP, strlen(result), conn, result);
+    return;
+}
+
 static int http_server_response(struct http_request *request, int keep_alive)
 {
-    char *response;
+    char response[256] = {'\0'};
 
     pr_info("requested_url = %s\n", request->request_url);
     if (request->method != HTTP_GET)
-        response = keep_alive ? HTTP_RESPONSE_501_KEEPALIVE : HTTP_RESPONSE_501;
+        snprintf(response, sizeof(response), "%s",
+                 keep_alive ? HTTP_RESPONSE_501_KEEPALIVE : HTTP_RESPONSE_501);
     else
-        response = keep_alive ? HTTP_RESPONSE_200_KEEPALIVE_DUMMY
-                              : HTTP_RESPONSE_200_DUMMY;
+        resp_req(request->request_url,
+                 keep_alive ? CONNECTION_KEEP : CONNECTION_CLOSE, response,
+                 sizeof(response));
     http_server_send(request->socket, response, strlen(response));
     return 0;
 }
