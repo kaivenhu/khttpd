@@ -13,6 +13,14 @@
 #define CONNECTION_CLOSE "Close"
 #define CONNECTION_KEEP "Keep-Alive"
 
+#ifdef DEBUG
+#define debug(fmt, ...) pr_info(fmt, __VA_ARGS__)
+#else /* DEBUG */
+#define debug(fmt, ...) \
+    do {                \
+    } while (0)
+#endif /* DEBUG */
+
 #define HTTP_RESPONSE_200_DUMMY                               \
     ""                                                        \
     "HTTP/1.1 200 OK" CRLF "Server: " KBUILD_MODNAME CRLF     \
@@ -47,6 +55,10 @@ struct http_request {
     char request_url[128];
     int complete;
 };
+
+static LIST_HEAD(connections);
+
+static DEFINE_MUTEX(mutex_connection);
 
 static int http_server_recv(struct socket *sock, char *buf, size_t size)
 {
@@ -122,7 +134,7 @@ static int http_server_response(struct http_request *request, int keep_alive)
 {
     char response[256] = {'\0'};
 
-    pr_info("requested_url = %s\n", request->request_url);
+    debug("requested_url = %s\n", request->request_url);
     if (request->method != HTTP_GET)
         snprintf(response, sizeof(response), "%s",
                  keep_alive ? HTTP_RESPONSE_501_KEEPALIVE : HTTP_RESPONSE_501);
@@ -188,8 +200,21 @@ static int http_parser_callback_message_complete(http_parser *parser)
     return 0;
 }
 
+static void remove_connection(struct http_connection *conn)
+{
+    mutex_lock(&mutex_connection);
+    if (!conn->is_alive) {
+        mutex_unlock(&mutex_connection);
+        return;
+    }
+    list_del(&conn->list);
+    mutex_unlock(&mutex_connection);
+    kfree(conn);
+}
+
 static int http_server_worker(void *arg)
 {
+    int ret = -1;
     char *buf;
     struct http_parser parser;
     struct http_parser_settings setting = {
@@ -201,7 +226,8 @@ static int http_server_worker(void *arg)
         .on_body = http_parser_callback_body,
         .on_message_complete = http_parser_callback_message_complete};
     struct http_request request;
-    struct socket *socket = (struct socket *) arg;
+    struct http_connection *conn = (struct http_connection *) arg;
+    struct socket *socket = conn->socket;
 
     allow_signal(SIGKILL);
     allow_signal(SIGTERM);
@@ -209,7 +235,7 @@ static int http_server_worker(void *arg)
     buf = kmalloc(RECV_BUFFER_SIZE, GFP_KERNEL);
     if (!buf) {
         pr_err("can't allocate memory!\n");
-        return -1;
+        goto end;
     }
 
     request.socket = socket;
@@ -226,17 +252,50 @@ static int http_server_worker(void *arg)
         if (request.complete && !http_should_keep_alive(&parser))
             break;
     }
+    ret = 0;
+end:
     kernel_sock_shutdown(socket, SHUT_RDWR);
     sock_release(socket);
     kfree(buf);
+    debug("Remove connect pid %d!\n", conn->worker->pid);
+    remove_connection(conn);
+    return ret;
+}
+
+static int create_connection(struct socket *socket)
+{
+    struct task_struct *worker = NULL;
+    struct http_connection *conn = (struct http_connection *) kzalloc(
+        sizeof(struct http_connection), GFP_KERNEL);
+    if (!conn) {
+        pr_err("can't kalloc connection\n");
+        goto err;
+    }
+    conn->socket = socket;
+    conn->is_alive = true;
+    mutex_lock(&mutex_connection);
+    list_add_tail(&conn->list, &connections);
+    mutex_unlock(&mutex_connection);
+    worker = kthread_run(http_server_worker, conn, KBUILD_MODNAME);
+    if (IS_ERR(worker)) {
+        pr_err("can't create more worker process\n");
+        goto err;
+    }
+    debug("Add pid %d into connections\n", worker->pid);
+    conn->worker = worker;
     return 0;
+
+err:
+    remove_connection(conn);
+    return -1;
 }
 
 int http_server_daemon(void *arg)
 {
     struct socket *socket;
-    struct task_struct *worker;
     struct http_server_param *param = (struct http_server_param *) arg;
+    struct http_connection *conn = NULL, *tmp = NULL;
+    struct list_head *pos = NULL, *q = NULL;
 
     allow_signal(SIGKILL);
     allow_signal(SIGTERM);
@@ -249,11 +308,25 @@ int http_server_daemon(void *arg)
             pr_err("kernel_accept() error: %d\n", err);
             continue;
         }
-        worker = kthread_run(http_server_worker, socket, KBUILD_MODNAME);
-        if (IS_ERR(worker)) {
-            pr_err("can't create more worker process\n");
-            continue;
+        if (0 != create_connection(socket)) {
+            pr_err("Failed to create connection\n");
+            break;
         }
+    }
+    mutex_lock(&mutex_connection);
+    list_for_each_entry_safe (conn, tmp, &connections, list) {
+        conn->is_alive = false;
+    }
+    mutex_unlock(&mutex_connection);
+
+    list_for_each_safe (pos, q, &connections) {
+        conn = list_entry(pos, struct http_connection, list);
+        send_sig(SIGTERM, conn->worker, 1);
+        if (conn->worker) {
+            kthread_stop(conn->worker);
+        }
+        list_del(pos);
+        kfree(conn);
     }
     return 0;
 }

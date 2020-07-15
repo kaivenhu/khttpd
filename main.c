@@ -110,7 +110,8 @@ static int __init khttpd_init(void)
 static void __exit khttpd_exit(void)
 {
     send_sig(SIGTERM, http_server, 1);
-    kthread_stop(http_server);
+    if (http_server)
+        kthread_stop(http_server);
     close_listen_socket(listen_socket);
     pr_info("module unloaded\n");
 }

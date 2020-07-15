@@ -3,6 +3,13 @@
 
 #include <net/sock.h>
 
+struct http_connection {
+    bool is_alive;
+    struct task_struct *worker;
+    struct socket *socket;
+    struct list_head list;
+};
+
 struct http_server_param {
     struct socket *listen_socket;
 };
