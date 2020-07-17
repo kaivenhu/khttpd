@@ -160,6 +160,12 @@ static int http_parser_callback_request_url(http_parser *parser,
                                             size_t len)
 {
     struct http_request *request = parser->data;
+    size_t remain =
+        (sizeof(request->request_url) - strlen(request->request_url) - 1);
+    if (remain < len) {
+        pr_err("Request url may truncate.\n");
+        len = remain;
+    }
     strncat(request->request_url, p, len);
     return 0;
 }
@@ -242,7 +248,7 @@ static int http_server_worker(void *arg)
     http_parser_init(&parser, HTTP_REQUEST);
     parser.data = &request;
     while (!kthread_should_stop()) {
-        int ret = http_server_recv(socket, buf, RECV_BUFFER_SIZE - 1);
+        ret = http_server_recv(socket, buf, RECV_BUFFER_SIZE - 1);
         if (ret <= 0) {
             if (ret)
                 pr_err("recv error: %d\n", ret);
