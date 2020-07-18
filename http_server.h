@@ -4,9 +4,8 @@
 #include <net/sock.h>
 
 struct http_connection {
-    bool is_alive;
-    struct task_struct *worker;
     struct socket *socket;
+    struct work_struct worker;
     struct list_head list;
 };
 

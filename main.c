@@ -7,6 +7,8 @@
 
 #include "http_server.h"
 
+#define MODULE_NAME "khttp"
+
 #define DEFAULT_PORT 8081
 #define DEFAULT_BACKLOG 100
 
@@ -15,9 +17,11 @@ module_param(port, ushort, S_IRUGO);
 static ushort backlog = DEFAULT_BACKLOG;
 module_param(backlog, ushort, S_IRUGO);
 
-static struct socket *listen_socket;
+static struct socket *listen_socket = NULL;
 static struct http_server_param param;
-static struct task_struct *http_server;
+static struct task_struct *http_server = NULL;
+
+struct workqueue_struct *khttp_wq = NULL;
 
 static inline int setsockopt(struct socket *sock,
                              int level,
@@ -90,29 +94,50 @@ static void close_listen_socket(struct socket *socket)
     sock_release(socket);
 }
 
+static void cleanup(void)
+{
+    if (http_server) {
+        send_sig(SIGTERM, http_server, 1);
+        kthread_stop(http_server);
+    }
+    if (listen_socket) {
+        close_listen_socket(listen_socket);
+    }
+    if (khttp_wq) {
+        destroy_workqueue(khttp_wq);
+    }
+}
+
 static int __init khttpd_init(void)
 {
     int err = open_listen_socket(port, backlog, &listen_socket);
     if (err < 0) {
         pr_err("can't open listen socket\n");
-        return err;
+        goto err;
+    }
+    khttp_wq = alloc_workqueue(MODULE_NAME, 0, 0);
+    if (NULL == khttp_wq) {
+        pr_err("can't allocate workqueue\n");
+        err = -1;
+        goto err;
     }
     param.listen_socket = listen_socket;
     http_server = kthread_run(http_server_daemon, &param, KBUILD_MODNAME);
     if (IS_ERR(http_server)) {
         pr_err("can't start http server daemon\n");
-        close_listen_socket(listen_socket);
-        return PTR_ERR(http_server);
+        err = PTR_ERR(http_server);
+        goto err;
     }
     return 0;
+
+err:
+    cleanup();
+    return err;
 }
 
 static void __exit khttpd_exit(void)
 {
-    send_sig(SIGTERM, http_server, 1);
-    if (http_server)
-        kthread_stop(http_server);
-    close_listen_socket(listen_socket);
+    cleanup();
     pr_info("module unloaded\n");
 }
 
